@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -16,11 +17,16 @@ class Settings(BaseSettings):
     # Storage
     db_path: str = str(Path.home() / ".aimemo" / "memory.db")
 
-    # Embedding
-    embedding_dim: int = 128
-    embedding_provider: str = "builtin"  # "builtin" | "openai" | "custom"
+    # LiteLLM / OpenAI-compatible API
     openai_api_key: str = ""
-    openai_embedding_model: str = "text-embedding-3-small"
+    openai_base_url: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    chat_model: str = "DeepSeek-V3.2"
+    vision_model: str = "gemini-3-flash-preview"
+
+    # Embedding
+    embedding_dim: int = 1536
+    embedding_provider: str = "auto"  # "auto" | "openai" | "builtin"
 
     # Memory engine
     short_term_capacity: int = 50
@@ -37,6 +43,12 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
+
+    def resolve_api_key(self) -> str:
+        return self.openai_api_key or os.environ.get("LITELLM_API_KEY", "")
+
+    def resolve_base_url(self) -> str:
+        return self.openai_base_url or os.environ.get("OPENAI_BASE_URL", "")
 
 
 settings = Settings()

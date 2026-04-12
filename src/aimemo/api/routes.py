@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from aimemo.core.models import (
     ConsolidationResult,
@@ -40,6 +40,33 @@ def _get_engine() -> MemoryEngine:
 async def create_memory(body: MemoryCreate):
     """Store a new memory."""
     return await _get_engine().add_memory(body)
+
+
+@router.post("/memories/image", response_model=MemoryRecord, status_code=201, tags=["memories"])
+async def create_image_memory(
+    file: UploadFile = File(...),
+    agent_id: str = Form("default"),
+    tags: str = Form("image"),
+    importance: float = Form(0.5),
+    prompt: str = Form(""),
+):
+    """Upload an image and create a memory from its visual content.
+
+    The image is sent to the vision model (gemini-3-flash-preview) which
+    produces a text description that becomes the memory content.
+    """
+    image_data = await file.read()
+    mime_type = file.content_type or "image/png"
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    return await _get_engine().add_image_memory(
+        image_data=image_data,
+        mime_type=mime_type,
+        agent_id=agent_id,
+        tags=tag_list,
+        importance=importance,
+        prompt=prompt,
+    )
 
 
 @router.get("/memories/{memory_id}", response_model=MemoryRecord, tags=["memories"])
