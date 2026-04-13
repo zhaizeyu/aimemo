@@ -270,6 +270,35 @@ async def test_no_contradiction_keeps_both(engine: MemoryEngine, mock_detect_no_
 
 
 @pytest.mark.asyncio
+async def test_contradiction_does_not_delete_old_when_save_fails(
+    engine: MemoryEngine, mock_detect_contradiction
+):
+    """If persisting the new semantic memory fails, old facts must remain active."""
+    old = await engine.add_memory(
+        MemoryCreate(content="Zhang uses Python.", memory_type="semantic", importance=0.7)
+    )
+
+    original_save = engine.store.save
+
+    async def flaky_save(record):
+        if record.content == "Updated merged fact from LLM.":
+            raise RuntimeError("db write failed")
+        return await original_save(record)
+
+    with (
+        patch.object(engine.store, "save", side_effect=flaky_save),
+        pytest.raises(RuntimeError),
+    ):
+        await engine.add_memory(
+            MemoryCreate(content="Zhang now uses Rust.", memory_type="semantic", importance=0.7)
+        )
+
+    assert await engine.store.get(old.id) is not None
+    archived = await engine.store.get_archive(old.id)
+    assert archived == []
+
+
+@pytest.mark.asyncio
 async def test_smart_add_memory_llm_fallback(engine: MemoryEngine):
     """When LLM analysis fails, smart_add falls back to defaults."""
     with patch("aimemo.core.llm.analyze_memory", new_callable=AsyncMock) as m:

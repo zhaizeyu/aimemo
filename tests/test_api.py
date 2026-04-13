@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -70,6 +72,59 @@ async def test_update_memory(client: AsyncClient):
     assert resp2.status_code == 200
     assert resp2.json()["content"] == "Updated"
     assert resp2.json()["importance"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_patch_semantic_reprocesses_fact_and_contradiction(client: AsyncClient):
+    old = await client.post(
+        "/api/v1/memories",
+        json={"content": "Alice lives in Paris.", "memory_type": "semantic"},
+    )
+    old_id = old.json()["id"]
+    target = await client.post(
+        "/api/v1/memories",
+        json={"content": "Alice likes coffee.", "memory_type": "semantic"},
+    )
+    target_id = target.json()["id"]
+
+    with (
+        patch("aimemo.core.llm.analyze_memory", new_callable=AsyncMock) as mock_analyze,
+        patch("aimemo.core.llm.detect_contradiction", new_callable=AsyncMock) as mock_detect,
+    ):
+        mock_analyze.return_value = {
+            "memory_type": "semantic",
+            "importance": 0.8,
+            "tags": ["fact"],
+            "subject": "Alice",
+            "predicate": "lives_in",
+            "object_value": "Berlin",
+            "update_type": "temporal_update",
+        }
+        mock_detect.return_value = {
+            "has_contradiction": True,
+            "contradicted_indices": [0],
+            "merged_fact": "",
+        }
+        patched = await client.patch(
+            f"/api/v1/memories/{target_id}",
+            json={"content": "Alice lives in Berlin."},
+        )
+
+    assert patched.status_code == 200
+    data = patched.json()
+    assert data["metadata"]["subject"] == "Alice"
+    assert data["metadata"]["predicate"] == "lives_in"
+    assert data["metadata"]["object_value"] == "Berlin"
+    assert data["metadata"]["update_type"] == "contradiction"
+    assert data["metadata"]["superseded_count"] == 1
+
+    old_fetch = await client.get(f"/api/v1/memories/{old_id}")
+    assert old_fetch.status_code == 404
+    archive = await client.get(f"/api/v1/archive/{old_id}")
+    assert archive.status_code == 200
+    archived = archive.json()
+    assert archived[0]["reason"] == "superseded"
+    assert archived[0]["successor_id"] == target_id
 
 
 @pytest.mark.asyncio
