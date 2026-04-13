@@ -33,6 +33,8 @@ from aimemo.core.models import (
     MemoryType,
     RetrievalResult,
     SmartMemoryCreate,
+    WorkingMemoryFlush,
+    WorkingMemoryInput,
 )
 from aimemo.storage.sqlite import MemoryStore
 
@@ -101,18 +103,27 @@ class MemoryEngine:
         """Analyze content with LLM, then store with auto-generated fields."""
         analysis = await self._analyze_content(req.content)
 
+        merged_metadata = {**req.metadata}
+        fact_metadata = analysis.pop("fact_metadata", None)
+        if fact_metadata:
+            merged_metadata.update(fact_metadata)
+
         full_req = MemoryCreate(
             content=req.content,
             memory_type=analysis.get("memory_type", MemoryType.EPISODIC),
             importance=analysis.get("importance", 0.5),
             tags=analysis.get("tags", []),
-            metadata=req.metadata,
+            metadata=merged_metadata,
             agent_id=req.agent_id,
         )
         return await self.add_memory(full_req)
 
     async def _analyze_content(self, content: str) -> dict:
-        """Use LLM to classify memory_type, importance, and tags."""
+        """Use LLM to classify memory_type, importance, and tags.
+
+        For semantic memories, also extracts SPO triple and update_type into
+        a ``"fact_metadata"`` key that the caller should merge into metadata.
+        """
         try:
             from aimemo.core.llm import analyze_memory
 
@@ -124,6 +135,14 @@ class MemoryEngine:
                 result["importance"] = max(0.0, min(1.0, float(result["importance"])))
             if "tags" not in result or not isinstance(result["tags"], list):
                 result["tags"] = []
+
+            if result.get("memory_type") == MemoryType.SEMANTIC:
+                fact_meta: dict = {}
+                for key in ("subject", "predicate", "object_value", "update_type"):
+                    if key in result:
+                        fact_meta[key] = result.pop(key)
+                if fact_meta:
+                    result["fact_metadata"] = fact_meta
 
             return result
         except Exception:
@@ -177,6 +196,12 @@ class MemoryEngine:
                         "Superseded memory %s with %s", old.id, new_record.id
                     )
 
+            if superseded > 0:
+                new_record.metadata = {
+                    **new_record.metadata,
+                    "update_type": "contradiction",
+                }
+
             merged_fact = result.get("merged_fact", "")
             if merged_fact and superseded > 0:
                 new_record.content = merged_fact
@@ -217,6 +242,74 @@ class MemoryEngine:
             record.tier = MemoryTier.LONG_TERM
 
         return await self.store.save(record)
+
+    # ── Working Memory ─────────────────────────────────────────────
+
+    async def add_working_memory(self, req: WorkingMemoryInput) -> MemoryRecord:
+        """Store a working-tier memory with auto-incremented sequence_num."""
+        existing = await self.store.list_memories(
+            agent_id=req.agent_id, tier=MemoryTier.WORKING, limit=10000
+        )
+        session_mems = [
+            m for m in existing if m.metadata.get("session_id") == req.session_id
+        ]
+        seq = max((m.metadata.get("sequence_num", 0) for m in session_mems), default=0) + 1
+
+        embedding = await self.embedder.embed(req.content)
+        record = MemoryRecord(
+            content=req.content,
+            memory_type=MemoryType.EPISODIC,
+            tier=MemoryTier.WORKING,
+            importance=0.5,
+            metadata={"session_id": req.session_id, "sequence_num": seq},
+            embedding=embedding,
+            agent_id=req.agent_id,
+        )
+        saved = await self.store.save(record)
+
+        await self._enforce_working_capacity(req.session_id, req.agent_id)
+        return saved
+
+    async def _enforce_working_capacity(self, session_id: str, agent_id: str) -> None:
+        """Sink oldest working memories when capacity is exceeded."""
+        all_working = await self.store.list_memories(
+            agent_id=agent_id, tier=MemoryTier.WORKING, limit=10000
+        )
+        session_mems = [
+            m for m in all_working if m.metadata.get("session_id") == session_id
+        ]
+        session_mems.sort(key=lambda m: m.metadata.get("sequence_num", 0))
+
+        overflow = len(session_mems) - settings.working_memory_capacity
+        if overflow <= 0:
+            return
+
+        for m in session_mems[:overflow]:
+            m.tier = MemoryTier.SHORT_TERM
+            m.memory_type = MemoryType.EPISODIC
+            await self.store.save(m)
+
+    async def get_working_memory(
+        self, session_id: str, agent_id: str = "default"
+    ) -> list[MemoryRecord]:
+        """Return ordered working memories for a session."""
+        all_working = await self.store.list_memories(
+            agent_id=agent_id, tier=MemoryTier.WORKING, limit=10000
+        )
+        session_mems = [
+            m for m in all_working if m.metadata.get("session_id") == session_id
+        ]
+        session_mems.sort(key=lambda m: m.metadata.get("sequence_num", 0))
+        return session_mems
+
+    async def flush_working_memory(self, req: WorkingMemoryFlush) -> int:
+        """Convert all working memories for a session to episodic/short_term."""
+        session_mems = await self.get_working_memory(req.session_id, req.agent_id)
+        for m in session_mems:
+            m.tier = MemoryTier.SHORT_TERM
+            m.memory_type = MemoryType.EPISODIC
+            await self.store.save(m)
+        return len(session_mems)
 
     async def retrieve(self, query: MemoryQuery) -> list[RetrievalResult]:
         query_embedding = await self.embedder.embed(query.query)
@@ -316,7 +409,7 @@ class MemoryEngine:
             hours = _hours_since(m.last_accessed)
             decay = settings.decay_rate * math.log1p(hours)
             new_imp = m.importance - decay
-            if m.tier == MemoryTier.CORE:
+            if m.tier in (MemoryTier.CORE, MemoryTier.WORKING):
                 continue
             if new_imp < 0.05 and m.tier != MemoryTier.LONG_TERM:
                 to_delete.append(m.id)
@@ -328,44 +421,111 @@ class MemoryEngine:
         return len(imp_updates) + deleted, to_delete
 
     async def _merge_similar(self, agent_id: str) -> int:
+        """Type-dispatched merge for short_term memories."""
         short = await self.store.list_memories(
             agent_id=agent_id, tier=MemoryTier.SHORT_TERM, limit=500
         )
         if len(short) < 2:
             return 0
 
+        by_type: dict[MemoryType, list[MemoryRecord]] = {}
+        for m in short:
+            by_type.setdefault(m.memory_type, []).append(m)
+
+        merged_count = 0
+        for mtype, mems in by_type.items():
+            if mtype == MemoryType.EPISODIC:
+                merged_count += await self._merge_episodic(mems, agent_id)
+            elif mtype == MemoryType.SEMANTIC:
+                pass
+            elif mtype == MemoryType.PROCEDURAL:
+                merged_count += await self._merge_procedural(mems, agent_id)
+            elif mtype == MemoryType.REFLECTION:
+                pass
+        return merged_count
+
+    async def _merge_episodic(
+        self, mems: list[MemoryRecord], agent_id: str
+    ) -> int:
+        """Cluster similar episodic memories (cosine >= 0.92) and LLM-summarize."""
+        if len(mems) < 2:
+            return 0
+
         merged_count = 0
         consumed: set[str] = set()
-        for i, a in enumerate(short):
+        for i, a in enumerate(mems):
             if a.id in consumed or a.embedding is None:
                 continue
-            for b in short[i + 1 :]:
+            cluster = [a]
+            for b in mems[i + 1 :]:
                 if b.id in consumed or b.embedding is None:
                     continue
                 sim = cosine_similarity(a.embedding, b.embedding)
                 if sim >= 0.92:
-                    merged_content = await self._llm_merge(a.content, b.content)
-                    merged_imp = min(1.0, max(a.importance, b.importance) + 0.05)
-                    merged_tags = list(set(a.tags + b.tags))
-                    new_embedding = await self.embedder.embed(merged_content)
-                    merged_record = MemoryRecord(
-                        content=merged_content,
-                        memory_type=a.memory_type,
-                        tier=MemoryTier.SHORT_TERM,
-                        importance=merged_imp,
-                        tags=merged_tags,
-                        metadata={**a.metadata, **b.metadata},
-                        embedding=new_embedding,
-                        access_count=a.access_count + b.access_count,
-                        source_ids=[a.id, b.id],
-                        agent_id=agent_id,
-                    )
-                    await self.store.save(merged_record)
+                    cluster.append(b)
+                    consumed.add(b.id)
+
+            if len(cluster) < 2:
+                continue
+
+            consumed.add(a.id)
+            contents = [m.content for m in cluster]
+            merged_content = await self._llm_merge(contents[0], "\n---\n".join(contents[1:]))
+            merged_imp = min(1.0, max(m.importance for m in cluster) + 0.05)
+            merged_tags = list({t for m in cluster for t in m.tags})
+            combined_meta: dict = {}
+            for m in cluster:
+                combined_meta.update(m.metadata)
+            new_embedding = await self.embedder.embed(merged_content)
+            merged_record = MemoryRecord(
+                content=merged_content,
+                memory_type=MemoryType.EPISODIC,
+                tier=MemoryTier.SHORT_TERM,
+                importance=merged_imp,
+                tags=merged_tags,
+                metadata=combined_meta,
+                embedding=new_embedding,
+                access_count=sum(m.access_count for m in cluster),
+                source_ids=[m.id for m in cluster],
+                agent_id=agent_id,
+            )
+            await self.store.save(merged_record)
+            for m in cluster:
+                await self.store.delete(
+                    m.id, reason="summarized", successor_id=merged_record.id
+                )
+            merged_count += 1
+        return merged_count
+
+    async def _merge_procedural(
+        self, mems: list[MemoryRecord], agent_id: str
+    ) -> int:
+        """For similar procedural memories, keep the newer, archive the older."""
+        if len(mems) < 2:
+            return 0
+
+        merged_count = 0
+        consumed: set[str] = set()
+        for i, a in enumerate(mems):
+            if a.id in consumed or a.embedding is None:
+                continue
+            for b in mems[i + 1 :]:
+                if b.id in consumed or b.embedding is None:
+                    continue
+                sim = cosine_similarity(a.embedding, b.embedding)
+                if sim >= 0.92:
+                    if a.created_at >= b.created_at:
+                        newer, older = a, b
+                    else:
+                        newer, older = b, a
+
+                    old_version = older.metadata.get("version", 1)
+                    newer.metadata = {**newer.metadata, "version": old_version + 1}
+                    await self.store.save(newer)
                     await self.store.delete(
-                        a.id, reason="merged", successor_id=merged_record.id
-                    )
-                    await self.store.delete(
-                        b.id, reason="merged", successor_id=merged_record.id
+                        older.id,
+                        reason="version_superseded",
+                        successor_id=newer.id,
                     )
                     consumed.update({a.id, b.id})
                     merged_count += 1

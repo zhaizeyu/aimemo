@@ -8,6 +8,7 @@ from aimemo.core.models import (
     ArchivedMemory,
     ConsolidationResult,
     CoreMemoryCreate,
+    FactRecord,
     MemoryCreate,
     MemoryQuery,
     MemoryRecord,
@@ -17,6 +18,8 @@ from aimemo.core.models import (
     MemoryUpdate,
     RetrievalResult,
     SmartMemoryCreate,
+    WorkingMemoryFlush,
+    WorkingMemoryInput,
 )
 from aimemo.engine.memory_engine import MemoryEngine
 
@@ -147,6 +150,71 @@ async def list_memories(
         limit=limit,
         offset=offset,
     )
+
+
+# ── Working Memory ────────────────────────────────────────────────────
+
+
+@router.post("/working", response_model=MemoryRecord, status_code=201, tags=["working"])
+async def add_working_memory(body: WorkingMemoryInput):
+    """Add an item to working memory for a session."""
+    return await _get_engine().add_working_memory(body)
+
+
+@router.get("/working", response_model=list[MemoryRecord], tags=["working"])
+async def get_working_memory(
+    session_id: str = Query(...),
+    agent_id: str = "default",
+):
+    """Return ordered working memory for a session."""
+    return await _get_engine().get_working_memory(session_id, agent_id)
+
+
+@router.post("/working/flush", tags=["working"])
+async def flush_working_memory(body: WorkingMemoryFlush):
+    """Convert all working memories for a session to episodic/short_term."""
+    count = await _get_engine().flush_working_memory(body)
+    return {"flushed": count}
+
+
+# ── Facts ─────────────────────────────────────────────────────────────
+
+
+@router.get("/facts", response_model=list[FactRecord], tags=["facts"])
+async def list_facts(
+    agent_id: str = "default",
+    subject: str | None = None,
+    predicate: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Return active semantic memories with their SPO triples projected."""
+    engine = _get_engine()
+    records = await engine.store.list_facts(
+        agent_id=agent_id,
+        subject=subject,
+        predicate=predicate,
+        limit=limit,
+        offset=offset,
+    )
+    results: list[FactRecord] = []
+    for r in records:
+        results.append(
+            FactRecord(
+                id=r.id,
+                content=r.content,
+                importance=r.importance,
+                tags=r.tags,
+                subject=r.metadata.get("subject"),
+                predicate=r.metadata.get("predicate"),
+                object_value=r.metadata.get("object_value"),
+                update_type=r.metadata.get("update_type"),
+                agent_id=r.agent_id,
+                created_at=r.created_at,
+                updated_at=r.updated_at,
+            )
+        )
+    return results
 
 
 # ── Retrieval ────────────────────────────────────────────────────────

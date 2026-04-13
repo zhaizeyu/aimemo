@@ -65,6 +65,7 @@ async def analyze_memory(content: str) -> dict:
     """Analyze content and return structured metadata for memory storage.
 
     Returns a dict with keys: memory_type, importance, tags.
+    For semantic memories also returns: subject, predicate, object_value, update_type.
     """
     client = get_openai_client()
     resp = await client.chat.completions.create(
@@ -84,7 +85,15 @@ async def analyze_memory(content: str) -> dict:
                     "  - 0.4-0.6: normal (general info, routine events)\n"
                     "  - 0.7-0.8: significant (preferences, key facts, decisions)\n"
                     "  - 0.9-1.0: critical (core identity, safety rules, system constraints)\n"
-                    '- "tags": list of 2-5 short keyword tags for retrieval, in the same language as the content\n'
+                    '- "tags": list of 2-5 short keyword tags for retrieval, in the same language '
+                    "as the content\n"
+                    "\n"
+                    'When memory_type is "semantic", ALSO include these fields:\n'
+                    '- "subject": the entity the fact is about (string)\n'
+                    '- "predicate": the relationship or attribute (string)\n'
+                    '- "object_value": the value or target of the relationship (string)\n'
+                    '- "update_type": one of "new_fact", "temporal_update", "contradiction", '
+                    '"refinement", "duplicate"\n'
                     "Output ONLY valid JSON, no markdown fences, no explanation."
                 ),
             },

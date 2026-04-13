@@ -95,6 +95,17 @@ class ImageMemoryCreate(BaseModel):
     prompt: str = ""
 
 
+class WorkingMemoryInput(BaseModel):
+    content: str
+    session_id: str
+    agent_id: str = "default"
+
+
+class WorkingMemoryFlush(BaseModel):
+    session_id: str
+    agent_id: str = "default"
+
+
 class MemoryUpdate(BaseModel):
     content: str | None = None
     importance: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -144,6 +155,20 @@ class ArchivedMemory(BaseModel):
     reason: str
     successor_id: str | None = None
     agent_id: str
+
+
+class FactRecord(BaseModel):
+    id: str
+    content: str
+    importance: float
+    tags: list[str]
+    subject: str | None = None
+    predicate: str | None = None
+    object_value: str | None = None
+    update_type: str | None = None
+    agent_id: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class ConsolidationResult(BaseModel):

@@ -371,6 +371,38 @@ class MemoryStore:
             "agent_id": agent_id,
         }
 
+    async def list_facts(
+        self,
+        agent_id: str = "default",
+        subject: str | None = None,
+        predicate: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        """Return active semantic memories, optionally filtered by SPO fields in metadata."""
+        assert self._db
+        conditions = [
+            "agent_id = :agent_id",
+            "memory_type = 'semantic'",
+        ]
+        params: dict = {"agent_id": agent_id}
+        if subject is not None:
+            conditions.append("json_extract(metadata, '$.subject') = :subject")
+            params["subject"] = subject
+        if predicate is not None:
+            conditions.append("json_extract(metadata, '$.predicate') = :predicate")
+            params["predicate"] = predicate
+        where = " AND ".join(conditions)
+        sql = (
+            f"SELECT * FROM memories WHERE {where} "
+            "ORDER BY updated_at DESC LIMIT :limit OFFSET :offset"
+        )
+        params["limit"] = limit
+        params["offset"] = offset
+        cursor = await self._db.execute(sql, params)
+        rows = await cursor.fetchall()
+        return [_row_to_record(r) for r in rows]
+
     async def get_candidates(
         self, agent_id: str, tiers: list[MemoryTier] | None, types: list[MemoryType] | None
     ) -> set[str]:
