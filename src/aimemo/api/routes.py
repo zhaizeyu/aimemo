@@ -7,6 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from aimemo.core.models import (
     ArchivedMemory,
     ConsolidationResult,
+    CoreMemoryCreate,
     MemoryCreate,
     MemoryQuery,
     MemoryRecord,
@@ -52,6 +53,16 @@ async def smart_create_memory(body: SmartMemoryCreate):
     determines memory_type, importance, and tags from the content.
     """
     return await _get_engine().smart_add_memory(body)
+
+
+@router.post("/memories/core", response_model=MemoryRecord, status_code=201, tags=["memories"])
+async def create_core_memory(body: CoreMemoryCreate):
+    """Store a core memory — pinned, always included in every retrieval.
+
+    Core memories never decay, never get deleted by consolidation.
+    Use for: system rules, user identity, critical constraints.
+    """
+    return await _get_engine().add_core_memory(body)
 
 
 @router.post("/memories/image", response_model=MemoryRecord, status_code=201, tags=["memories"])

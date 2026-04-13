@@ -56,3 +56,27 @@ def mock_analyze_memory():
             "tags": ["python", "preference"],
         }
         yield m
+
+
+@pytest.fixture
+def mock_detect_contradiction():
+    """Mock detect_contradiction to avoid real LLM calls."""
+    with patch("aimemo.core.llm.detect_contradiction", new_callable=AsyncMock) as m:
+        m.return_value = {
+            "has_contradiction": True,
+            "contradicted_indices": [0],
+            "merged_fact": "Updated merged fact from LLM.",
+        }
+        yield m
+
+
+@pytest.fixture
+def mock_detect_no_contradiction():
+    """Mock detect_contradiction returning no contradiction."""
+    with patch("aimemo.core.llm.detect_contradiction", new_callable=AsyncMock) as m:
+        m.return_value = {
+            "has_contradiction": False,
+            "contradicted_indices": [],
+            "merged_fact": "",
+        }
+        yield m

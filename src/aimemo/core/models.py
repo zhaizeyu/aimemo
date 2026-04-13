@@ -28,6 +28,7 @@ def _new_id() -> str:
 
 
 class MemoryTier(StrEnum):
+    CORE = "core"
     WORKING = "working"
     SHORT_TERM = "short_term"
     LONG_TERM = "long_term"
@@ -72,6 +73,13 @@ class SmartMemoryCreate(BaseModel):
     content: str
     agent_id: str = "default"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CoreMemoryCreate(BaseModel):
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    agent_id: str = "default"
 
 
 class MemoryAnalysis(BaseModel):

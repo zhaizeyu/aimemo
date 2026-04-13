@@ -209,6 +209,67 @@ async def test_archive_count(engine: MemoryEngine):
 
 
 @pytest.mark.asyncio
+async def test_core_memory_always_in_retrieval(engine: MemoryEngine):
+    """Core memories appear in every retrieval result."""
+    from aimemo.core.models import CoreMemoryCreate
+
+    core = await engine.add_core_memory(
+        CoreMemoryCreate(content="System rule: always respond in Chinese.")
+    )
+    assert core.tier.value == "core"
+    assert core.importance == 1.0
+
+    await engine.add_memory(MemoryCreate(content="Some random episodic memory."))
+
+    results = await engine.retrieve(MemoryQuery(query="completely unrelated topic"))
+    result_ids = {r.memory.id for r in results}
+    assert core.id in result_ids
+
+
+@pytest.mark.asyncio
+async def test_core_memory_immune_to_decay(engine: MemoryEngine):
+    """Core memories are skipped during decay."""
+    from aimemo.core.models import CoreMemoryCreate
+
+    core = await engine.add_core_memory(
+        CoreMemoryCreate(content="Never delete this.")
+    )
+    result = await engine.consolidate("default")
+    fetched = await engine.store.get(core.id)
+    assert fetched is not None
+    assert fetched.tier.value == "core"
+    assert result.decayed >= 0
+
+
+@pytest.mark.asyncio
+async def test_contradiction_supersedes_old_fact(engine: MemoryEngine, mock_detect_contradiction):
+    """When a new semantic fact contradicts an old one, the old is archived."""
+    old = await engine.add_memory(
+        MemoryCreate(content="Zhang uses Python.", memory_type="semantic", importance=0.7)
+    )
+    await engine.add_memory(
+        MemoryCreate(content="Zhang now uses Rust.", memory_type="semantic", importance=0.7)
+    )
+    assert await engine.store.get(old.id) is None
+    archived = await engine.store.get_archive(old.id)
+    assert len(archived) == 1
+    assert archived[0].reason == "superseded"
+
+
+@pytest.mark.asyncio
+async def test_no_contradiction_keeps_both(engine: MemoryEngine, mock_detect_no_contradiction):
+    """When no contradiction, both facts coexist."""
+    old = await engine.add_memory(
+        MemoryCreate(content="Zhang uses Python.", memory_type="semantic", importance=0.7)
+    )
+    added = await engine.add_memory(
+        MemoryCreate(content="Zhang also likes Go.", memory_type="semantic", importance=0.7)
+    )
+    assert await engine.store.get(old.id) is not None
+    assert await engine.store.get(added.id) is not None
+
+
+@pytest.mark.asyncio
 async def test_smart_add_memory_llm_fallback(engine: MemoryEngine):
     """When LLM analysis fails, smart_add falls back to defaults."""
     with patch("aimemo.core.llm.analyze_memory", new_callable=AsyncMock) as m:

@@ -10,6 +10,9 @@ Key SOTA features:
                                architecture (Park et al. 2023).
   6. LLM importance scoring  : optionally uses the chat model to evaluate importance.
   7. Multimodal ingestion    : image → text via gemini-3-flash-preview.
+  8. Contradiction detection : LLM checks new semantic facts against existing ones,
+                               auto-supersedes outdated facts (archived with reason).
+  9. Core tier               : pinned memories always included in retrieval context.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from aimemo.core.config import settings
 from aimemo.core.embeddings import cosine_similarity, get_embedding_provider
 from aimemo.core.models import (
     ConsolidationResult,
+    CoreMemoryCreate,
     MemoryCreate,
     MemoryQuery,
     MemoryRecord,
@@ -64,6 +68,10 @@ class MemoryEngine:
         if record.importance >= 0.8:
             record.tier = MemoryTier.LONG_TERM
 
+        if record.memory_type == MemoryType.SEMANTIC:
+            superseded = await self._check_and_supersede(record)
+            record.metadata = {**record.metadata, "superseded_count": superseded}
+
         saved = await self.store.save(record)
 
         agent = req.agent_id
@@ -73,6 +81,21 @@ class MemoryEngine:
             await self._maybe_reflect(agent)
 
         return saved
+
+    async def add_core_memory(self, req: CoreMemoryCreate) -> MemoryRecord:
+        """Store a core memory — pinned, always in context, never decays."""
+        embedding = await self.embedder.embed(req.content)
+        record = MemoryRecord(
+            content=req.content,
+            memory_type=MemoryType.SEMANTIC,
+            tier=MemoryTier.CORE,
+            importance=1.0,
+            tags=req.tags,
+            metadata=req.metadata,
+            embedding=embedding,
+            agent_id=req.agent_id,
+        )
+        return await self.store.save(record)
 
     async def smart_add_memory(self, req: SmartMemoryCreate) -> MemoryRecord:
         """Analyze content with LLM, then store with auto-generated fields."""
@@ -110,6 +133,59 @@ class MemoryEngine:
                 "importance": 0.5,
                 "tags": [],
             }
+
+    async def _check_and_supersede(self, new_record: MemoryRecord) -> int:
+        """Find existing semantic memories that contradict the new one, archive them."""
+        try:
+            from aimemo.core.llm import detect_contradiction
+
+            existing = await self.store.list_memories(
+                agent_id=new_record.agent_id,
+                memory_type=MemoryType.SEMANTIC,
+                limit=50,
+            )
+            if not existing:
+                return 0
+
+            similar = []
+            for m in existing:
+                if m.embedding and new_record.embedding:
+                    sim = cosine_similarity(m.embedding, new_record.embedding)
+                    if sim >= 0.5:
+                        similar.append(m)
+
+            if not similar:
+                return 0
+
+            result = await detect_contradiction(
+                new_record.content, [m.content for m in similar]
+            )
+
+            if not result.get("has_contradiction", False):
+                return 0
+
+            contradicted_indices = result.get("contradicted_indices", [])
+            superseded = 0
+            for idx in contradicted_indices:
+                if 0 <= idx < len(similar):
+                    old = similar[idx]
+                    await self.store.delete(
+                        old.id, reason="superseded", successor_id=new_record.id
+                    )
+                    superseded += 1
+                    logger.info(
+                        "Superseded memory %s with %s", old.id, new_record.id
+                    )
+
+            merged_fact = result.get("merged_fact", "")
+            if merged_fact and superseded > 0:
+                new_record.content = merged_fact
+                new_record.embedding = await self.embedder.embed(merged_fact)
+
+            return superseded
+        except Exception:
+            logger.warning("Contradiction detection failed, skipping", exc_info=True)
+            return 0
 
     async def add_image_memory(
         self,
@@ -191,6 +267,22 @@ class MemoryEngine:
                 r.memory.id, importance_boost=settings.importance_boost_on_access
             )
 
+        core_memories = await self.store.list_memories(
+            agent_id=query.agent_id, tier=MemoryTier.CORE, limit=100
+        )
+        seen_ids = {r.memory.id for r in results}
+        for cm in core_memories:
+            if cm.id not in seen_ids:
+                results.append(
+                    RetrievalResult(
+                        memory=cm,
+                        relevance_score=1.0,
+                        recency_score=1.0,
+                        importance_score=1.0,
+                        combined_score=1.0,
+                    )
+                )
+
         return results
 
     # ── Consolidation ────────────────────────────────────────────────
@@ -224,6 +316,8 @@ class MemoryEngine:
             hours = _hours_since(m.last_accessed)
             decay = settings.decay_rate * math.log1p(hours)
             new_imp = m.importance - decay
+            if m.tier == MemoryTier.CORE:
+                continue
             if new_imp < 0.05 and m.tier != MemoryTier.LONG_TERM:
                 to_delete.append(m.id)
             elif abs(new_imp - m.importance) > 0.001:

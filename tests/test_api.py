@@ -183,6 +183,37 @@ async def test_stats_includes_archive_count(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_create_core_memory(client: AsyncClient):
+    """Core memory endpoint creates pinned memories."""
+    resp = await client.post(
+        "/api/v1/memories/core",
+        json={"content": "System: always use Chinese", "tags": ["system"]},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["tier"] == "core"
+    assert data["importance"] == 1.0
+    assert data["memory_type"] == "semantic"
+
+
+@pytest.mark.asyncio
+async def test_core_in_retrieval(client: AsyncClient):
+    """Core memories always appear in retrieval results."""
+    resp = await client.post(
+        "/api/v1/memories/core",
+        json={"content": "Critical system constraint"},
+    )
+    core_id = resp.json()["id"]
+
+    resp2 = await client.post(
+        "/api/v1/retrieve", json={"query": "completely unrelated", "top_k": 5}
+    )
+    assert resp2.status_code == 200
+    ids = [r["memory"]["id"] for r in resp2.json()]
+    assert core_id in ids
+
+
+@pytest.mark.asyncio
 async def test_smart_create_memory(client: AsyncClient, mock_analyze_memory):
     """Smart endpoint auto-generates memory_type, importance, tags via LLM."""
     resp = await client.post(
