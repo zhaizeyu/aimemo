@@ -2,19 +2,20 @@
 
 ## Cursor Cloud specific instructions
 
-AIMemo is a FastAPI-based AI agent memory module with SQLite storage and in-process vector search. It uses LiteLLM-proxied OpenAI-compatible APIs for embeddings, chat, and vision.
+AIMemo is a SOTA AI agent memory module (FastAPI + SQLite + numpy vector index + LiteLLM). It features 4-tier memory (core/working/short_term/long_term), 4 memory types (episodic/semantic/procedural/reflection), SPO fact triples, contradiction detection, working memory with session binding, and type-specific merge strategies.
 
 ### Services
 
 | Service | Command | Notes |
 |---------|---------|-------|
-| API server | `uvicorn aimemo.app:app --reload --port 8000` | Auto-reloads on code changes. Swagger docs at `/docs`. |
+| API server | `uvicorn aimemo.app:app --reload --port 8000` | Auto-reloads on code changes. Swagger docs at `/docs`. 20 endpoints. |
 
 ### Development commands
 
 - **Install:** `pip install -e ".[dev]"`
 - **Lint:** `ruff check src/ tests/`
-- **Test:** `pytest tests/ -v`
+- **Test:** `pytest tests/ -v` (43 tests, including 8 benchmark)
+- **Benchmark only:** `pytest tests/test_benchmark.py -v`
 - **Dev server:** `uvicorn aimemo.app:app --reload --port 8000`
 
 ### LLM / Embedding configuration
@@ -23,15 +24,15 @@ The system uses OpenAI-compatible APIs via LiteLLM. Three models are configured:
 
 | Model | Config key | Purpose |
 |-------|-----------|---------|
-| `text-embedding-3-small` | `AIMEMO_EMBEDDING_MODEL` | Vector embeddings |
-| `DeepSeek-V3.2` | `AIMEMO_CHAT_MODEL` | Reflection generation, memory merging |
+| `text-embedding-3-small` | `AIMEMO_EMBEDDING_MODEL` | Vector embeddings (1536d) |
+| `DeepSeek-V3.2` | `AIMEMO_CHAT_MODEL` | Reflection, merge, smart analysis, contradiction detection, SPO extraction |
 | `gemini-3-flash-preview` | `AIMEMO_VISION_MODEL` | Image → text (multimodal memories) |
 
 Environment variables needed at runtime:
 - `LITELLM_API_KEY` — API key for the LiteLLM gateway (read as fallback if `AIMEMO_OPENAI_API_KEY` is empty)
 - `OPENAI_BASE_URL` — base URL of the LiteLLM gateway (read as fallback if `AIMEMO_OPENAI_BASE_URL` is empty)
 
-When no API key is available, embedding automatically falls back to the builtin hash-based provider. LLM-powered features (reflection, merge) also fall back to simple string operations.
+When no API key is available, embedding automatically falls back to the builtin hash-based provider. LLM-powered features (reflection, merge, smart analysis, contradiction detection) also fall back to simple string operations or defaults.
 
 ### Starting the dev server
 
@@ -42,6 +43,15 @@ export PATH="$HOME/.local/bin:$PATH"
 uvicorn aimemo.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+### Key architecture concepts
+
+- **Core tier**: Pinned memories (`tier=core`), always appended to every retrieval result with `score=1.0`. Never decay, never auto-delete. Use for system rules, user identity, safety constraints.
+- **Working memory**: Session-bound (`session_id` in metadata), capacity-limited (default 7), auto-sinks oldest to `episodic`/`short_term` on overflow. Immune to decay. Flush endpoint converts all to episodic.
+- **Fact layer**: Semantic memories auto-extract SPO triples (`subject`/`predicate`/`object_value`) and `update_type` via LLM. Queryable via `GET /facts?subject=X&predicate=Y`.
+- **Contradiction detection**: On semantic memory insert, existing facts with cosine similarity ≥ 0.5 are checked for contradiction via LLM. Contradicted facts are archived with `reason=superseded` and `successor_id`.
+- **Type-specific merge**: During consolidation, episodic memories are cluster-summarized, procedural memories are version-superseded, semantic and reflection are never batch-merged.
+- **Archive**: Every delete (manual, merge, decay, supersede) auto-archives the full memory snapshot to `memory_archive` table with `reason` and optional `successor_id`.
+
 ### Gotchas
 
 - The `~/.local/bin` directory must be on `PATH` for `uvicorn`, `pytest`, and `ruff` (installed by pip as user packages). Run `export PATH="$HOME/.local/bin:$PATH"` if commands are not found.
@@ -49,5 +59,7 @@ uvicorn aimemo.app:app --host 0.0.0.0 --port 8000 --reload
 - `AIMEMO_EMBEDDING_PROVIDER` defaults to `auto` — it will use OpenAI embeddings if an API key is present, otherwise the builtin hash-based fallback.
 - When switching between OpenAI and builtin embeddings, delete the DB first (`rm ~/.aimemo/memory.db`) because the embedding dimensions differ (1536 vs 128).
 - `pytest-asyncio` is configured in `pyproject.toml` with `asyncio_mode = "auto"` so async test functions work without per-function markers.
-- Tests always use `builtin` embeddings via `conftest.py` auto-use fixture, so they run without API keys.
+- Tests always use `builtin` embeddings via `conftest.py` auto-use fixture, so they run without API keys. LLM calls are mocked in `conftest.py`.
 - The `B008` ruff rule is disabled in `pyproject.toml` because FastAPI's `File(...)` / `Form(...)` defaults require function calls in parameter defaults.
+- Working memory `sequence_num` is auto-incremented per session. Flushing resets the session's working memory to episodic/short_term.
+- Fact queries (`GET /facts`) filter by JSON fields inside `metadata` — this uses SQLite's `json_extract()`.
