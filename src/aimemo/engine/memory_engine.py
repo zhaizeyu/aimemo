@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from aimemo.core.config import settings
@@ -31,6 +32,7 @@ from aimemo.core.models import (
     MemoryRecord,
     MemoryTier,
     MemoryType,
+    MemoryUpdate,
     RetrievalResult,
     SmartMemoryCreate,
     WorkingMemoryFlush,
@@ -44,6 +46,14 @@ logger = logging.getLogger(__name__)
 def _hours_since(dt: datetime) -> float:
     delta = datetime.now(UTC) - dt.replace(tzinfo=UTC) if dt.tzinfo is None else datetime.now(UTC) - dt
     return max(delta.total_seconds() / 3600.0, 0.0)
+
+
+@dataclass
+class SupersedePlan:
+    """Contradiction resolution plan to apply after the new record is persisted."""
+
+    contradicted_ids: list[str]
+    merged_fact: str | None = None
 
 
 class MemoryEngine:
@@ -70,11 +80,28 @@ class MemoryEngine:
         if record.importance >= 0.8:
             record.tier = MemoryTier.LONG_TERM
 
+        plan = SupersedePlan(contradicted_ids=[])
         if record.memory_type == MemoryType.SEMANTIC:
-            superseded = await self._check_and_supersede(record)
-            record.metadata = {**record.metadata, "superseded_count": superseded}
+            plan = await self._check_and_supersede(record)
+            if plan.merged_fact:
+                record.content = plan.merged_fact
+                record.embedding = await self.embedder.embed(plan.merged_fact)
+            if plan.contradicted_ids:
+                record.metadata = {
+                    **record.metadata,
+                    "update_type": "contradiction",
+                    "superseded_count": len(plan.contradicted_ids),
+                }
 
         saved = await self.store.save(record)
+        if record.memory_type == MemoryType.SEMANTIC and plan.contradicted_ids:
+            superseded = await self._apply_supersede(
+                contradicted_ids=plan.contradicted_ids,
+                successor_id=saved.id,
+            )
+            if saved.metadata.get("superseded_count") != superseded:
+                saved.metadata = {**saved.metadata, "superseded_count": superseded}
+                saved = await self.store.save(saved)
 
         agent = req.agent_id
         self._access_counter[agent] = self._access_counter.get(agent, 0) + 1
@@ -82,6 +109,54 @@ class MemoryEngine:
             self._access_counter[agent] = 0
             await self._maybe_reflect(agent)
 
+        return saved
+
+    async def update_memory(self, memory_id: str, body: MemoryUpdate) -> MemoryRecord | None:
+        """Update a memory and re-run semantic pipelines when content changes."""
+        rec = await self.store.get(memory_id)
+        if rec is None:
+            return None
+
+        content_changed = body is not None and body.content is not None and body.content != rec.content
+
+        if body is not None and body.importance is not None:
+            rec.importance = body.importance
+        if body is not None and body.tags is not None:
+            rec.tags = body.tags
+        if body is not None and body.metadata is not None:
+            rec.metadata = body.metadata
+
+        plan = SupersedePlan(contradicted_ids=[])
+        if content_changed:
+            rec.content = body.content
+            rec.embedding = await self.embedder.embed(rec.content)
+
+            if rec.memory_type == MemoryType.SEMANTIC:
+                analysis = await self._analyze_content(rec.content)
+                fact_metadata = analysis.get("fact_metadata", {})
+                if fact_metadata:
+                    rec.metadata = {**rec.metadata, **fact_metadata}
+
+                plan = await self._check_and_supersede(rec, exclude_id=rec.id)
+                if plan.merged_fact:
+                    rec.content = plan.merged_fact
+                    rec.embedding = await self.embedder.embed(plan.merged_fact)
+                if plan.contradicted_ids:
+                    rec.metadata = {
+                        **rec.metadata,
+                        "update_type": "contradiction",
+                        "superseded_count": len(plan.contradicted_ids),
+                    }
+
+        saved = await self.store.save(rec)
+        if rec.memory_type == MemoryType.SEMANTIC and plan.contradicted_ids:
+            superseded = await self._apply_supersede(
+                contradicted_ids=plan.contradicted_ids,
+                successor_id=saved.id,
+            )
+            if saved.metadata.get("superseded_count") != superseded:
+                saved.metadata = {**saved.metadata, "superseded_count": superseded}
+                saved = await self.store.save(saved)
         return saved
 
     async def add_core_memory(self, req: CoreMemoryCreate) -> MemoryRecord:
@@ -153,8 +228,10 @@ class MemoryEngine:
                 "tags": [],
             }
 
-    async def _check_and_supersede(self, new_record: MemoryRecord) -> int:
-        """Find existing semantic memories that contradict the new one, archive them."""
+    async def _check_and_supersede(
+        self, new_record: MemoryRecord, exclude_id: str | None = None
+    ) -> SupersedePlan:
+        """Find existing semantic contradictions and build a supersede plan."""
         try:
             from aimemo.core.llm import detect_contradiction
 
@@ -163,8 +240,10 @@ class MemoryEngine:
                 memory_type=MemoryType.SEMANTIC,
                 limit=50,
             )
+            if exclude_id is not None:
+                existing = [m for m in existing if m.id != exclude_id]
             if not existing:
-                return 0
+                return SupersedePlan(contradicted_ids=[])
 
             similar = []
             for m in existing:
@@ -174,43 +253,39 @@ class MemoryEngine:
                         similar.append(m)
 
             if not similar:
-                return 0
+                return SupersedePlan(contradicted_ids=[])
 
             result = await detect_contradiction(
                 new_record.content, [m.content for m in similar]
             )
 
             if not result.get("has_contradiction", False):
-                return 0
+                return SupersedePlan(contradicted_ids=[])
 
             contradicted_indices = result.get("contradicted_indices", [])
-            superseded = 0
+            contradicted_ids: list[str] = []
             for idx in contradicted_indices:
                 if 0 <= idx < len(similar):
-                    old = similar[idx]
-                    await self.store.delete(
-                        old.id, reason="superseded", successor_id=new_record.id
-                    )
-                    superseded += 1
-                    logger.info(
-                        "Superseded memory %s with %s", old.id, new_record.id
-                    )
-
-            if superseded > 0:
-                new_record.metadata = {
-                    **new_record.metadata,
-                    "update_type": "contradiction",
-                }
-
+                    contradicted_ids.append(similar[idx].id)
             merged_fact = result.get("merged_fact", "")
-            if merged_fact and superseded > 0:
-                new_record.content = merged_fact
-                new_record.embedding = await self.embedder.embed(merged_fact)
-
-            return superseded
+            return SupersedePlan(
+                contradicted_ids=contradicted_ids,
+                merged_fact=merged_fact or None,
+            )
         except Exception:
             logger.warning("Contradiction detection failed, skipping", exc_info=True)
-            return 0
+            return SupersedePlan(contradicted_ids=[])
+
+    async def _apply_supersede(self, contradicted_ids: list[str], successor_id: str) -> int:
+        superseded = 0
+        for old_id in contradicted_ids:
+            deleted = await self.store.delete(
+                old_id, reason="superseded", successor_id=successor_id
+            )
+            if deleted:
+                superseded += 1
+                logger.info("Superseded memory %s with %s", old_id, successor_id)
+        return superseded
 
     async def add_image_memory(
         self,

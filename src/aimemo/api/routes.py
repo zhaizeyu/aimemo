@@ -109,19 +109,10 @@ async def get_memory(memory_id: str):
 async def update_memory(memory_id: str, body: MemoryUpdate):
     """Partially update a memory."""
     engine = _get_engine()
-    rec = await engine.store.get(memory_id)
-    if rec is None:
+    updated = await engine.update_memory(memory_id, body)
+    if updated is None:
         raise HTTPException(404, "Memory not found")
-    if body.content is not None:
-        rec.content = body.content
-        rec.embedding = await engine.embedder.embed(body.content)
-    if body.importance is not None:
-        rec.importance = body.importance
-    if body.tags is not None:
-        rec.tags = body.tags
-    if body.metadata is not None:
-        rec.metadata = body.metadata
-    return await engine.store.save(rec)
+    return updated
 
 
 @router.delete("/memories/{memory_id}", status_code=204, tags=["memories"])
