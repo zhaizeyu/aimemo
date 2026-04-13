@@ -14,6 +14,7 @@ from aimemo.core.models import (
     MemoryType,
     MemoryUpdate,
     RetrievalResult,
+    SmartMemoryCreate,
 )
 from aimemo.engine.memory_engine import MemoryEngine
 
@@ -40,6 +41,16 @@ def _get_engine() -> MemoryEngine:
 async def create_memory(body: MemoryCreate):
     """Store a new memory."""
     return await _get_engine().add_memory(body)
+
+
+@router.post("/memories/smart", response_model=MemoryRecord, status_code=201, tags=["memories"])
+async def smart_create_memory(body: SmartMemoryCreate):
+    """Store a memory with LLM-analyzed metadata.
+
+    Only `content` is required. The LLM (DeepSeek-V3.2) automatically
+    determines memory_type, importance, and tags from the content.
+    """
+    return await _get_engine().smart_add_memory(body)
 
 
 @router.post("/memories/image", response_model=MemoryRecord, status_code=201, tags=["memories"])
