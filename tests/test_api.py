@@ -142,6 +142,47 @@ async def test_image_memory_endpoint(client: AsyncClient, mock_vision_describe):
 
 
 @pytest.mark.asyncio
+async def test_delete_creates_archive(client: AsyncClient):
+    """Deleting via API archives the memory."""
+    resp = await client.post("/api/v1/memories", json={"content": "To archive"})
+    mem_id = resp.json()["id"]
+
+    await client.delete(f"/api/v1/memories/{mem_id}")
+
+    resp2 = await client.get(f"/api/v1/archive/{mem_id}")
+    assert resp2.status_code == 200
+    data = resp2.json()
+    assert len(data) == 1
+    assert data[0]["original_id"] == mem_id
+    assert data[0]["reason"] == "manual"
+
+
+@pytest.mark.asyncio
+async def test_list_archive(client: AsyncClient):
+    """List archive endpoint returns archived memories."""
+    for i in range(2):
+        resp = await client.post(
+            "/api/v1/memories", json={"content": f"Archive list test {i}"}
+        )
+        await client.delete(f"/api/v1/memories/{resp.json()['id']}")
+
+    resp2 = await client.get("/api/v1/archive")
+    assert resp2.status_code == 200
+    assert len(resp2.json()) >= 2
+
+
+@pytest.mark.asyncio
+async def test_stats_includes_archive_count(client: AsyncClient):
+    """Stats endpoint includes archived_count."""
+    resp = await client.post("/api/v1/memories", json={"content": "Stat archive test"})
+    await client.delete(f"/api/v1/memories/{resp.json()['id']}")
+
+    resp2 = await client.get("/api/v1/stats")
+    assert resp2.status_code == 200
+    assert resp2.json()["archived_count"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_smart_create_memory(client: AsyncClient, mock_analyze_memory):
     """Smart endpoint auto-generates memory_type, importance, tags via LLM."""
     resp = await client.post(

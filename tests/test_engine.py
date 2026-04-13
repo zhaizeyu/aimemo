@@ -164,6 +164,51 @@ async def test_smart_add_memory(engine: MemoryEngine, mock_analyze_memory):
 
 
 @pytest.mark.asyncio
+async def test_delete_archives_memory(engine: MemoryEngine):
+    """Deleting a memory archives it before removal."""
+    mem = await engine.add_memory(MemoryCreate(content="Will be archived."))
+    original_id = mem.id
+
+    await engine.store.delete(original_id, reason="manual")
+    assert await engine.store.get(original_id) is None
+
+    archived = await engine.store.get_archive(original_id)
+    assert len(archived) == 1
+    assert archived[0].original_id == original_id
+    assert archived[0].content == "Will be archived."
+    assert archived[0].reason == "manual"
+
+
+@pytest.mark.asyncio
+async def test_merge_archives_with_successor(engine: MemoryEngine):
+    """Merged memories are archived with reason='merged' and successor_id."""
+    mem_a = await engine.add_memory(MemoryCreate(content="Duplicate content alpha."))
+    mem_b = await engine.add_memory(MemoryCreate(content="Duplicate content alpha."))
+
+    await engine.store.delete(mem_a.id, reason="merged", successor_id="new-merged-id")
+    await engine.store.delete(mem_b.id, reason="merged", successor_id="new-merged-id")
+
+    archive_a = await engine.store.get_archive(mem_a.id)
+    archive_b = await engine.store.get_archive(mem_b.id)
+    assert len(archive_a) == 1
+    assert archive_a[0].reason == "merged"
+    assert archive_a[0].successor_id == "new-merged-id"
+    assert len(archive_b) == 1
+    assert archive_b[0].successor_id == "new-merged-id"
+
+
+@pytest.mark.asyncio
+async def test_archive_count(engine: MemoryEngine):
+    """Archive count tracks deleted memories."""
+    for i in range(3):
+        mem = await engine.add_memory(MemoryCreate(content=f"Archive count test {i}"))
+        await engine.store.delete(mem.id, reason="decay")
+
+    count = await engine.store.archive_count("default")
+    assert count == 3
+
+
+@pytest.mark.asyncio
 async def test_smart_add_memory_llm_fallback(engine: MemoryEngine):
     """When LLM analysis fails, smart_add falls back to defaults."""
     with patch("aimemo.core.llm.analyze_memory", new_callable=AsyncMock) as m:

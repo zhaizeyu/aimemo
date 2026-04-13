@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from aimemo.core.models import (
+    ArchivedMemory,
     ConsolidationResult,
     MemoryCreate,
     MemoryQuery,
@@ -155,6 +156,33 @@ async def consolidate(agent_id: str = "default"):
     return await _get_engine().consolidate(agent_id)
 
 
+# ── Archive ──────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/archive/{original_id}", response_model=list[ArchivedMemory], tags=["archive"]
+)
+async def get_archive(original_id: str):
+    """Get all archived versions of a memory by its original ID."""
+    return await _get_engine().store.get_archive(original_id)
+
+
+@router.get("/archive", response_model=list[ArchivedMemory], tags=["archive"])
+async def list_archive(
+    agent_id: str = "default",
+    reason: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List archived memories with optional reason filter.
+
+    Reasons: "merged" (consolidation), "decay" (importance dropped), "manual" (user deleted).
+    """
+    return await _get_engine().store.list_archive(
+        agent_id=agent_id, reason=reason, limit=limit, offset=offset
+    )
+
+
 # ── System ───────────────────────────────────────────────────────────
 
 
@@ -162,6 +190,7 @@ async def consolidate(agent_id: str = "default"):
 async def stats(agent_id: str = "default"):
     """Return memory statistics for an agent."""
     data = await _get_engine().store.count(agent_id)
+    data["archived_count"] = await _get_engine().store.archive_count(agent_id)
     return MemoryStats(**data)
 
 
