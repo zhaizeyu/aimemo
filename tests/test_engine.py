@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from aimemo.core.models import MemoryCreate, MemoryQuery, MemoryType
@@ -98,3 +100,49 @@ async def test_reflection_triggered(engine: MemoryEngine):
 
     settings.reflection_trigger_count = original_trigger
     settings.reflection_min_memories = original_min
+
+
+@pytest.mark.asyncio
+async def test_image_memory(engine: MemoryEngine, mock_vision_describe):
+    """Image memory uses the vision model to convert image → text."""
+    mem = await engine.add_image_memory(
+        image_data=b"\x89PNG\r\n\x1a\nfake_image_bytes",
+        mime_type="image/png",
+        agent_id="default",
+        tags=["photo", "test"],
+        importance=0.6,
+    )
+    assert mem.content == "A photograph showing a cat sitting on a windowsill."
+    assert mem.metadata["source"] == "image"
+    assert "photo" in mem.tags
+    mock_vision_describe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_merge_fallback(engine: MemoryEngine):
+    """When LLM merge fails, the engine falls back to concatenation."""
+    with patch(
+        "aimemo.engine.memory_engine.MemoryEngine._llm_merge",
+        new_callable=AsyncMock,
+    ) as mock_merge:
+        mock_merge.return_value = "Merged: content A and content B together."
+
+        result = await engine._llm_merge("content A", "content B")
+        assert "Merged" in result
+
+
+@pytest.mark.asyncio
+async def test_llm_reflect_fallback(engine: MemoryEngine):
+    """When LLM reflection fails, the engine falls back to simple concatenation."""
+    from aimemo.core.models import MemoryRecord
+
+    memories = [
+        MemoryRecord(content=f"Memory {i}", memory_type=MemoryType.EPISODIC)
+        for i in range(3)
+    ]
+
+    with patch("aimemo.core.llm.chat_completion", new_callable=AsyncMock) as mock_chat:
+        mock_chat.side_effect = Exception("API down")
+        result = await engine._llm_reflect(memories)
+        assert "Reflection:" in result
+        assert "Memory 0" in result

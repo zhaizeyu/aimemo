@@ -5,9 +5,11 @@ Key SOTA features:
   2. Adaptive decay          : Ebbinghaus-inspired forgetting curve with access boost.
   3. Tier promotion          : working → short_term → long_term based on importance.
   4. Memory consolidation    : merges near-duplicate short-term memories.
-  5. Automatic reflection    : generates higher-order "reflection" memories that
-                               summarise clusters, mirroring the Generative Agents
+  5. LLM-powered reflection  : generates higher-order "reflection" memories using
+                               DeepSeek-V3.2, mirroring the Generative Agents
                                architecture (Park et al. 2023).
+  6. LLM importance scoring  : optionally uses the chat model to evaluate importance.
+  7. Multimodal ingestion    : image → text via gemini-3-flash-preview.
 """
 
 from __future__ import annotations
@@ -70,6 +72,37 @@ class MemoryEngine:
             await self._maybe_reflect(agent)
 
         return saved
+
+    async def add_image_memory(
+        self,
+        image_data: bytes,
+        mime_type: str = "image/png",
+        agent_id: str = "default",
+        tags: list[str] | None = None,
+        importance: float = 0.5,
+        prompt: str = "",
+    ) -> MemoryRecord:
+        """Ingest an image: convert to text via vision model, then store."""
+        from aimemo.core.llm import vision_describe
+
+        description = await vision_describe(image_data, mime_type=mime_type, prompt=prompt)
+
+        embedding = await self.embedder.embed(description)
+        record = MemoryRecord(
+            content=description,
+            memory_type=MemoryType.EPISODIC,
+            tier=MemoryTier.SHORT_TERM,
+            importance=importance,
+            tags=tags or ["image"],
+            metadata={"source": "image", "mime_type": mime_type},
+            embedding=embedding,
+            agent_id=agent_id,
+        )
+
+        if record.importance >= 0.8:
+            record.tier = MemoryTier.LONG_TERM
+
+        return await self.store.save(record)
 
     async def retrieve(self, query: MemoryQuery) -> list[RetrievalResult]:
         query_embedding = await self.embedder.embed(query.query)
@@ -179,7 +212,7 @@ class MemoryEngine:
                     continue
                 sim = cosine_similarity(a.embedding, b.embedding)
                 if sim >= 0.92:
-                    merged_content = f"{a.content}\n---\n{b.content}"
+                    merged_content = await self._llm_merge(a.content, b.content)
                     merged_imp = min(1.0, max(a.importance, b.importance) + 0.05)
                     merged_tags = list(set(a.tags + b.tags))
                     new_embedding = await self.embedder.embed(merged_content)
@@ -203,6 +236,27 @@ class MemoryEngine:
                     break
         return merged_count
 
+    async def _llm_merge(self, content_a: str, content_b: str) -> str:
+        """Use the chat model to intelligently merge two similar memories."""
+        try:
+            from aimemo.core.llm import chat_completion
+
+            prompt = (
+                "Merge the following two memory entries into a single, concise memory. "
+                "Preserve all unique information. Output ONLY the merged text, no extra commentary.\n\n"
+                f"Memory A:\n{content_a}\n\n"
+                f"Memory B:\n{content_b}"
+            )
+            return await chat_completion(
+                prompt,
+                system="You are a memory consolidation assistant. Merge memories concisely.",
+                temperature=0.3,
+                max_tokens=512,
+            )
+        except Exception:
+            logger.warning("LLM merge failed, falling back to concatenation", exc_info=True)
+            return f"{content_a}\n---\n{content_b}"
+
     # ── Reflection ───────────────────────────────────────────────────
 
     async def _maybe_reflect(self, agent_id: str) -> int:
@@ -212,12 +266,12 @@ class MemoryEngine:
         if len(recent) < settings.reflection_min_memories:
             return 0
 
-        contents = [m.content[:200] for m in recent[: settings.reflection_min_memories]]
-        summary = "Reflection: " + " | ".join(contents)
+        source_memories = recent[: settings.reflection_min_memories]
+        summary = await self._llm_reflect(source_memories)
 
         avg_imp = sum(m.importance for m in recent) / len(recent)
         tags = list({t for m in recent for t in m.tags})[:10]
-        source_ids = [m.id for m in recent[: settings.reflection_min_memories]]
+        source_ids = [m.id for m in source_memories]
 
         embedding = await self.embedder.embed(summary)
         reflection = MemoryRecord(
@@ -234,3 +288,28 @@ class MemoryEngine:
         await self.store.save(reflection)
         logger.info("Generated reflection memory %s for agent %s", reflection.id, agent_id)
         return 1
+
+    async def _llm_reflect(self, memories: list[MemoryRecord]) -> str:
+        """Use the chat model to generate a high-level reflection from recent memories."""
+        try:
+            from aimemo.core.llm import chat_completion
+
+            memory_texts = "\n".join(
+                f"- [{m.memory_type.value}] {m.content[:300]}" for m in memories
+            )
+            prompt = (
+                "Based on the following recent memories, generate a concise high-level reflection "
+                "or insight. Identify patterns, recurring themes, or important conclusions. "
+                "Output ONLY the reflection text.\n\n"
+                f"Memories:\n{memory_texts}"
+            )
+            return await chat_completion(
+                prompt,
+                system="You are a reflective AI that synthesizes memories into higher-order insights.",
+                temperature=0.5,
+                max_tokens=512,
+            )
+        except Exception:
+            logger.warning("LLM reflection failed, falling back to simple summary", exc_info=True)
+            contents = [m.content[:200] for m in memories]
+            return "Reflection: " + " | ".join(contents)

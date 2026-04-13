@@ -123,3 +123,19 @@ async def test_stats(client: AsyncClient):
 async def test_not_found(client: AsyncClient):
     resp = await client.get("/api/v1/memories/nonexistent-id")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_image_memory_endpoint(client: AsyncClient, mock_vision_describe):
+    """Test the image upload endpoint."""
+    fake_image = b"\x89PNG\r\n\x1a\nfake_image_data"
+    resp = await client.post(
+        "/api/v1/memories/image",
+        files={"file": ("test.png", fake_image, "image/png")},
+        data={"agent_id": "default", "tags": "photo,test", "importance": "0.7"},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["metadata"]["source"] == "image"
+    assert "photo" in data["tags"]
+    mock_vision_describe.assert_awaited_once()
