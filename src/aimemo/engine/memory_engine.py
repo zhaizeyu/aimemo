@@ -28,6 +28,7 @@ from aimemo.core.models import (
     MemoryTier,
     MemoryType,
     RetrievalResult,
+    SmartMemoryCreate,
 )
 from aimemo.storage.sqlite import MemoryStore
 
@@ -72,6 +73,43 @@ class MemoryEngine:
             await self._maybe_reflect(agent)
 
         return saved
+
+    async def smart_add_memory(self, req: SmartMemoryCreate) -> MemoryRecord:
+        """Analyze content with LLM, then store with auto-generated fields."""
+        analysis = await self._analyze_content(req.content)
+
+        full_req = MemoryCreate(
+            content=req.content,
+            memory_type=analysis.get("memory_type", MemoryType.EPISODIC),
+            importance=analysis.get("importance", 0.5),
+            tags=analysis.get("tags", []),
+            metadata=req.metadata,
+            agent_id=req.agent_id,
+        )
+        return await self.add_memory(full_req)
+
+    async def _analyze_content(self, content: str) -> dict:
+        """Use LLM to classify memory_type, importance, and tags."""
+        try:
+            from aimemo.core.llm import analyze_memory
+
+            result = await analyze_memory(content)
+
+            if "memory_type" in result:
+                result["memory_type"] = MemoryType(result["memory_type"])
+            if "importance" in result:
+                result["importance"] = max(0.0, min(1.0, float(result["importance"])))
+            if "tags" not in result or not isinstance(result["tags"], list):
+                result["tags"] = []
+
+            return result
+        except Exception:
+            logger.warning("LLM analysis failed, using defaults", exc_info=True)
+            return {
+                "memory_type": MemoryType.EPISODIC,
+                "importance": 0.5,
+                "tags": [],
+            }
 
     async def add_image_memory(
         self,

@@ -139,3 +139,18 @@ async def test_image_memory_endpoint(client: AsyncClient, mock_vision_describe):
     assert data["metadata"]["source"] == "image"
     assert "photo" in data["tags"]
     mock_vision_describe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_smart_create_memory(client: AsyncClient, mock_analyze_memory):
+    """Smart endpoint auto-generates memory_type, importance, tags via LLM."""
+    resp = await client.post(
+        "/api/v1/memories/smart",
+        json={"content": "用户偏好Python编程"},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["memory_type"] == "semantic"
+    assert data["importance"] >= 0.8
+    assert "python" in data["tags"]
+    mock_analyze_memory.assert_awaited_once()

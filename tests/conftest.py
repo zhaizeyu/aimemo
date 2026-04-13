@@ -44,3 +44,15 @@ def mock_vision_describe():
     with patch("aimemo.core.llm.vision_describe", new_callable=AsyncMock) as m:
         m.return_value = "A photograph showing a cat sitting on a windowsill."
         yield m
+
+
+@pytest.fixture
+def mock_analyze_memory():
+    """Mock analyze_memory to avoid real LLM calls."""
+    with patch("aimemo.core.llm.analyze_memory", new_callable=AsyncMock) as m:
+        m.return_value = {
+            "memory_type": "semantic",
+            "importance": 0.8,
+            "tags": ["python", "preference"],
+        }
+        yield m

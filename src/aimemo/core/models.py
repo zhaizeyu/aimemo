@@ -68,6 +68,18 @@ class MemoryCreate(BaseModel):
     agent_id: str = "default"
 
 
+class SmartMemoryCreate(BaseModel):
+    content: str
+    agent_id: str = "default"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryAnalysis(BaseModel):
+    memory_type: MemoryType
+    importance: float
+    tags: list[str]
+
+
 class ImageMemoryCreate(BaseModel):
     agent_id: str = "default"
     tags: list[str] = Field(default_factory=lambda: ["image"])

@@ -146,3 +146,33 @@ async def test_llm_reflect_fallback(engine: MemoryEngine):
         result = await engine._llm_reflect(memories)
         assert "Reflection:" in result
         assert "Memory 0" in result
+
+
+@pytest.mark.asyncio
+async def test_smart_add_memory(engine: MemoryEngine, mock_analyze_memory):
+    """Smart memory creation uses LLM to auto-fill type, importance, tags."""
+    from aimemo.core.models import SmartMemoryCreate
+
+    mem = await engine.smart_add_memory(
+        SmartMemoryCreate(content="用户张三喜欢使用Python编程")
+    )
+    assert mem.memory_type.value == "semantic"
+    assert mem.importance >= 0.8
+    assert "python" in mem.tags
+    assert mem.embedding is not None
+    mock_analyze_memory.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_smart_add_memory_llm_fallback(engine: MemoryEngine):
+    """When LLM analysis fails, smart_add falls back to defaults."""
+    with patch("aimemo.core.llm.analyze_memory", new_callable=AsyncMock) as m:
+        m.side_effect = Exception("API down")
+        from aimemo.core.models import SmartMemoryCreate
+
+        mem = await engine.smart_add_memory(
+            SmartMemoryCreate(content="Some fallback content")
+        )
+        assert mem.memory_type.value == "episodic"
+        assert mem.importance == 0.5
+        assert mem.embedding is not None
