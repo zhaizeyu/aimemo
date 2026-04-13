@@ -267,8 +267,12 @@ class MemoryEngine:
                         agent_id=agent_id,
                     )
                     await self.store.save(merged_record)
-                    await self.store.delete(a.id)
-                    await self.store.delete(b.id)
+                    await self.store.delete(
+                        a.id, reason="merged", successor_id=merged_record.id
+                    )
+                    await self.store.delete(
+                        b.id, reason="merged", successor_id=merged_record.id
+                    )
                     consumed.update({a.id, b.id})
                     merged_count += 1
                     break

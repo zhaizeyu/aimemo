@@ -117,6 +117,24 @@ class MemoryStats(BaseModel):
     by_tier: dict[str, int]
     by_type: dict[str, int]
     avg_importance: float
+    archived_count: int = 0
+    agent_id: str
+
+
+class ArchivedMemory(BaseModel):
+    id: str
+    original_id: str
+    content: str
+    memory_type: MemoryType
+    tier: MemoryTier
+    importance: float
+    tags: list[str]
+    metadata: dict[str, Any]
+    access_count: int
+    created_at: datetime
+    archived_at: datetime
+    reason: str
+    successor_id: str | None = None
     agent_id: str
 
 

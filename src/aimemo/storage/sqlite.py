@@ -16,7 +16,7 @@ import aiosqlite
 import numpy as np
 
 from aimemo.core.config import settings
-from aimemo.core.models import MemoryRecord, MemoryTier, MemoryType
+from aimemo.core.models import ArchivedMemory, MemoryRecord, MemoryTier, MemoryType
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,28 @@ CREATE INDEX IF NOT EXISTS idx_memories_agent  ON memories(agent_id);
 CREATE INDEX IF NOT EXISTS idx_memories_tier   ON memories(tier);
 CREATE INDEX IF NOT EXISTS idx_memories_type   ON memories(memory_type);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
+
+CREATE TABLE IF NOT EXISTS memory_archive (
+    id            TEXT PRIMARY KEY,
+    original_id   TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    memory_type   TEXT NOT NULL,
+    tier          TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    tags          TEXT NOT NULL DEFAULT '[]',
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    embedding     TEXT,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    archived_at   TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    successor_id  TEXT,
+    agent_id      TEXT NOT NULL DEFAULT 'default'
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_original ON memory_archive(original_id);
+CREATE INDEX IF NOT EXISTS idx_archive_agent    ON memory_archive(agent_id);
+CREATE INDEX IF NOT EXISTS idx_archive_reason   ON memory_archive(reason);
 """
 
 
@@ -83,6 +105,25 @@ def _row_to_record(row: aiosqlite.Row) -> MemoryRecord:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         source_ids=json.loads(row["source_ids"]),
+        agent_id=row["agent_id"],
+    )
+
+
+def _row_to_archived(row: aiosqlite.Row) -> ArchivedMemory:
+    return ArchivedMemory(
+        id=row["id"],
+        original_id=row["original_id"],
+        content=row["content"],
+        memory_type=MemoryType(row["memory_type"]),
+        tier=MemoryTier(row["tier"]),
+        importance=row["importance"],
+        tags=json.loads(row["tags"]),
+        metadata=json.loads(row["metadata"]),
+        access_count=row["access_count"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        archived_at=datetime.fromisoformat(row["archived_at"]),
+        reason=row["reason"],
+        successor_id=row["successor_id"],
         agent_id=row["agent_id"],
     )
 
@@ -205,8 +246,11 @@ class MemoryStore:
         row = await cursor.fetchone()
         return _row_to_record(row) if row else None
 
-    async def delete(self, memory_id: str) -> bool:
+    async def delete(
+        self, memory_id: str, reason: str = "manual", successor_id: str | None = None
+    ) -> bool:
         assert self._db
+        await self._archive_one(memory_id, reason=reason, successor_id=successor_id)
         cursor = await self._db.execute(
             "DELETE FROM memories WHERE id = :id", {"id": memory_id}
         )
@@ -274,7 +318,7 @@ class MemoryStore:
             )
         await self._db.commit()
 
-    async def batch_delete(self, ids: list[str]) -> int:
+    async def batch_delete(self, ids: list[str], reason: str = "decay") -> int:
         assert self._db
         if not ids:
             return 0
@@ -284,6 +328,8 @@ class MemoryStore:
         )
         existing = [r["id"] for r in await cursor.fetchall()]
         if existing:
+            for mid in existing:
+                await self._archive_one(mid, reason=reason)
             await self._db.execute(
                 f"DELETE FROM memories WHERE id IN ({','.join('?' for _ in existing)})",
                 existing,
@@ -346,3 +392,87 @@ class MemoryStore:
         where = " AND ".join(conditions)
         cursor = await self._db.execute(f"SELECT id FROM memories WHERE {where}", params)
         return {r["id"] for r in await cursor.fetchall()}
+
+    # ── Archive ──────────────────────────────────────────────────────
+
+    async def _archive_one(
+        self, memory_id: str, reason: str = "unknown", successor_id: str | None = None
+    ) -> None:
+        """Copy a memory to the archive table before deletion."""
+        assert self._db
+        cursor = await self._db.execute(
+            "SELECT * FROM memories WHERE id = :id", {"id": memory_id}
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+
+        import uuid
+
+        archive_id = uuid.uuid4().hex
+        now = _now_iso()
+        await self._db.execute(
+            """INSERT OR IGNORE INTO memory_archive
+               (id, original_id, content, memory_type, tier, importance, tags,
+                metadata, embedding, access_count, created_at, archived_at,
+                reason, successor_id, agent_id)
+               VALUES (:id, :original_id, :content, :memory_type, :tier,
+                       :importance, :tags, :metadata, :embedding, :access_count,
+                       :created_at, :archived_at, :reason, :successor_id, :agent_id)""",
+            {
+                "id": archive_id,
+                "original_id": row["id"],
+                "content": row["content"],
+                "memory_type": row["memory_type"],
+                "tier": row["tier"],
+                "importance": row["importance"],
+                "tags": row["tags"],
+                "metadata": row["metadata"],
+                "embedding": row["embedding"],
+                "access_count": row["access_count"],
+                "created_at": row["created_at"],
+                "archived_at": now,
+                "reason": reason,
+                "successor_id": successor_id,
+                "agent_id": row["agent_id"],
+            },
+        )
+
+    async def get_archive(self, original_id: str) -> list[ArchivedMemory]:
+        """Get all archived versions of a memory by its original ID."""
+        assert self._db
+        cursor = await self._db.execute(
+            "SELECT * FROM memory_archive WHERE original_id = :oid ORDER BY archived_at DESC",
+            {"oid": original_id},
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_archived(r) for r in rows]
+
+    async def list_archive(
+        self,
+        agent_id: str = "default",
+        reason: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[ArchivedMemory]:
+        assert self._db
+        conditions = ["agent_id = :agent_id"]
+        params: dict = {"agent_id": agent_id}
+        if reason:
+            conditions.append("reason = :reason")
+            params["reason"] = reason
+        where = " AND ".join(conditions)
+        sql = f"SELECT * FROM memory_archive WHERE {where} ORDER BY archived_at DESC LIMIT :limit OFFSET :offset"
+        params["limit"] = limit
+        params["offset"] = offset
+        cursor = await self._db.execute(sql, params)
+        rows = await cursor.fetchall()
+        return [_row_to_archived(r) for r in rows]
+
+    async def archive_count(self, agent_id: str = "default") -> int:
+        assert self._db
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) as c FROM memory_archive WHERE agent_id = :a",
+            {"a": agent_id},
+        )
+        return (await cursor.fetchone())["c"]
