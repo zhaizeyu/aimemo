@@ -98,6 +98,7 @@ class EmotionContext(BaseModel):
     state_summary: str
     relationship_summary: str
     salient_signals: list[str] = Field(default_factory=list)
+    generation_notes: str = ""
 
 
 class EmotionUpdateResult(BaseModel):
@@ -107,4 +108,24 @@ class EmotionUpdateResult(BaseModel):
     emotion_state: EmotionState
     relationship_state: RelationshipState
     context: EmotionContext
+    materialized_memory_ids: list[str] = Field(default_factory=list)
+
+
+class EmotionProcessInput(BaseModel):
+    agent_id: str = "default"
+    user_id: str
+    session_id: str | None = None
+    raw_text: str
+
+
+class RuntimeChatInput(BaseModel):
+    agent_id: str = "default"
+    user_id: str
+    session_id: str
+    user_text: str
+
+
+class RuntimeChatOutput(BaseModel):
+    reply: str
+    emotion_context: EmotionContext
     materialized_memory_ids: list[str] = Field(default_factory=list)

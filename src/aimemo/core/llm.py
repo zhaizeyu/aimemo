@@ -181,3 +181,40 @@ async def vision_describe(image_data: bytes, mime_type: str = "image/png", promp
         max_tokens=1024,
     )
     return resp.choices[0].message.content or ""
+
+
+async def analyze_emotion_signals(raw_text: str) -> dict:
+    """Analyze emotional signals from one user utterance.
+
+    Returns JSON-compatible keys:
+    intent, support_need, vulnerability_signal, attachment_signal, conflict_signal
+    """
+    client = get_openai_client()
+    resp = await client.chat.completions.create(
+        model=settings.chat_model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an emotion signal extractor for conversational support systems. "
+                    "Output ONLY valid JSON with these fields:\n"
+                    '- "intent": one of "chat", "support", "advice", "conflict"\n'
+                    '- "support_need": float 0.0-1.0\n'
+                    '- "vulnerability_signal": float 0.0-1.0\n'
+                    '- "attachment_signal": float 0.0-1.0\n'
+                    '- "conflict_signal": float 0.0-1.0\n'
+                    "No markdown, no explanation."
+                ),
+            },
+            {"role": "user", "content": raw_text},
+        ],
+        temperature=0.1,
+        max_tokens=180,
+    )
+    import json
+
+    raw = resp.choices[0].message.content or "{}"
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return json.loads(raw)

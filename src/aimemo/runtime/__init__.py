@@ -1,5 +1,5 @@
 """Runtime orchestration package."""
 
-from aimemo.runtime.assistant_runtime import AssistantRuntime
+from aimemo.runtime.assistant_runtime import AssistantRuntime, LLMResponseGenerator
 
-__all__ = ["AssistantRuntime"]
+__all__ = ["AssistantRuntime", "LLMResponseGenerator"]
