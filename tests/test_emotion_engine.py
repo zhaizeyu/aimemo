@@ -139,3 +139,26 @@ async def test_only_stable_patterns_materialize(emotion_engine: EmotionEngine):
     )
     assert ids == ["mem-1"]
     memory_engine.add_memory.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_materialization_cooldown_blocks_duplicate_write(emotion_engine: EmotionEngine):
+    memory_engine = AsyncMock()
+    memory_engine.add_memory = AsyncMock(return_value=type("X", (), {"id": "mem-2"})())
+
+    for _ in range(7):
+        await emotion_engine.process_user_event(
+            agent_id="default",
+            user_id="u8",
+            session_id="s8",
+            raw_text="我很难过，想被安慰一下",
+        )
+    first = await emotion_engine.materialize_patterns_to_memory(
+        agent_id="default", user_id="u8", memory_engine=memory_engine
+    )
+    second = await emotion_engine.materialize_patterns_to_memory(
+        agent_id="default", user_id="u8", memory_engine=memory_engine
+    )
+    assert first == ["mem-2"]
+    assert second == []
+    assert memory_engine.add_memory.await_count == 1

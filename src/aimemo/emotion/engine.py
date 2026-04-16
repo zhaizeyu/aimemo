@@ -38,7 +38,7 @@ class EmotionEngine:
         raw_text: str,
         session_id: str | None = None,
     ) -> EmotionUpdateResult:
-        event = self.analyzer.analyze(raw_text=raw_text, user_id=user_id, session_id=session_id)
+        event = await self.analyzer.analyze(raw_text=raw_text, user_id=user_id, session_id=session_id)
 
         state = await self.get_state(agent_id=agent_id, session_id=session_id)
         relation = await self.get_relationship(agent_id=agent_id, user_id=user_id)
@@ -94,6 +94,11 @@ class EmotionEngine:
             "boundary": "保持边界，平静且明确。",
             "neutral": "自然对话，简洁清晰。",
         }[state.support_mode.value]
+        generation_notes = (
+            f"当前用户 {user_id} 更偏向 {state.support_mode.value} 支持模式；"
+            f"关系熟悉度 {relation.familiarity:.2f}、信任度 {relation.trust:.2f}。"
+            "优先回应情绪，再给最小可执行建议；避免说教和过度承诺。"
+        )
 
         return EmotionContext(
             agent_id=agent_id,
@@ -111,6 +116,7 @@ class EmotionEngine:
                 f"affection={relation.affection:.2f}, closeness={relation.emotional_closeness:.2f}"
             ),
             salient_signals=signals,
+            generation_notes=generation_notes,
         )
 
     async def decay_or_recover_state(

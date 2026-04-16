@@ -7,9 +7,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from aimemo.api.routes import set_engine
+from aimemo.api.routes import set_services
 from aimemo.app import create_app
+from aimemo.emotion.engine import EmotionEngine
+from aimemo.emotion.store import EmotionStore
 from aimemo.engine.memory_engine import MemoryEngine
+from aimemo.runtime.assistant_runtime import AssistantRuntime
 from aimemo.storage.sqlite import MemoryStore
 
 
@@ -18,7 +21,13 @@ async def client(tmp_path):
     store = MemoryStore(db_path=str(tmp_path / "api_test.db"))
     await store.init()
     engine = MemoryEngine(store)
-    set_engine(engine)
+    emotion_store = EmotionStore(db_path=str(tmp_path / "api_test.db"))
+    await emotion_store.init()
+    emotion_engine = EmotionEngine(emotion_store)
+    responder = AsyncMock()
+    responder.generate = AsyncMock(return_value="收到，我在这陪你。")
+    runtime = AssistantRuntime(engine, emotion_engine, responder)
+    set_services(memory_engine=engine, emotion_engine=emotion_engine, runtime=runtime)
 
     app = create_app()
 
@@ -26,6 +35,7 @@ async def client(tmp_path):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
+    await emotion_store.close()
     await store.close()
 
 
@@ -281,3 +291,46 @@ async def test_smart_create_memory(client: AsyncClient, mock_analyze_memory):
     assert data["importance"] >= 0.8
     assert "python" in data["tags"]
     mock_analyze_memory.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_emotion_endpoints(client: AsyncClient):
+    processed = await client.post(
+        "/api/v1/emotion/process",
+        json={
+            "agent_id": "default",
+            "user_id": "u-emotion",
+            "session_id": "s-emotion",
+            "raw_text": "我今天很难过，想和你聊聊",
+        },
+    )
+    assert processed.status_code == 200
+    assert processed.json()["context"]["support_mode"] == "comforting"
+
+    state = await client.get("/api/v1/emotion/state", params={"session_id": "s-emotion"})
+    assert state.status_code == 200
+    assert state.json()["support_mode"] == "comforting"
+
+    relation = await client.get(
+        "/api/v1/emotion/relationship",
+        params={"user_id": "u-emotion"},
+    )
+    assert relation.status_code == 200
+    assert relation.json()["interaction_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_chat_endpoint(client: AsyncClient):
+    resp = await client.post(
+        "/api/v1/runtime/chat",
+        json={
+            "agent_id": "default",
+            "user_id": "u-runtime",
+            "session_id": "s-runtime",
+            "user_text": "今天压力很大，想听你说句话",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["reply"] == "收到，我在这陪你。"
+    assert data["emotion_context"]["support_mode"] == "comforting"

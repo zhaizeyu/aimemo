@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from aimemo.core.llm import chat_completion
 from aimemo.core.models import MemoryCreate, MemoryQuery, MemoryType, WorkingMemoryInput
 from aimemo.emotion.engine import EmotionEngine
 
@@ -11,6 +12,21 @@ from aimemo.emotion.engine import EmotionEngine
 class ResponseGenerator(Protocol):
     async def generate(self, context: dict) -> str:
         """Generate the final assistant response from a unified context."""
+
+
+class LLMResponseGenerator:
+    """Default responder backed by configured chat model."""
+
+    async def generate(self, context: dict) -> str:
+        prompt = (
+            f"用户输入：{context['user_text']}\n\n"
+            f"情绪引导：{context['emotion_context'].get('generation_notes', '')}\n"
+            f"策略：support_mode={context['response_policy']['support_mode']}, "
+            f"style_mode={context['response_policy']['style_mode']}\n"
+            f"相关记忆：{context['retrieved_memories']}\n\n"
+            "请输出一段自然、简洁、以共情为先的中文回复。"
+        )
+        return await chat_completion(prompt, system="你是一个温暖、可靠的陪伴助手。", temperature=0.5)
 
 
 class AssistantRuntime:
