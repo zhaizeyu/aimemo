@@ -11,7 +11,7 @@ from aimemo.core.config import settings
 from aimemo.core.llm import analyze_emotion_signals
 from aimemo.emotion.models import EmotionEvent
 
-_NEG_WORDS = ("难过", "焦虑", "崩溃", "痛苦", "糟糕", "sad", "anxious", "stress")
+_NEG_WORDS = ("难过", "焦虑", "崩溃", "痛苦", "糟糕", "sad", "anxious", "stress", "撑不住", "顶不住")
 _POS_WORDS = ("开心", "高兴", "感谢", "谢谢", "棒", "great", "love")
 _URGENT_WORDS = ("马上", "立刻", "紧急", "救命", "urgent", "asap")
 _ADVICE_WORDS = ("怎么办", "建议", "plan", "advice", "应该")
@@ -19,6 +19,24 @@ _SUPPORT_WORDS = ("陪", "听我", "倾诉", "安慰", "抱抱", "help me")
 _CONFLICT_WORDS = ("闭嘴", "滚", "讨厌", "你错", "hate", "stupid")
 _ATTACHMENT_WORDS = ("别离开", "需要你", "想你", "陪着我", "miss you")
 _PLAYFUL_WORDS = ("哈哈", "lol", "玩笑", "逗", "😄")
+_HIDDEN_SUPPORT_CUES = (
+    "其实",
+    "有点扛不住",
+    "撑不住",
+    "顶不住",
+    "不知道和谁说",
+    "睡不着",
+    "没人懂",
+    "心里很乱",
+)
+_RESTRAINED_VULNERABILITY_CUES = (
+    "没事",
+    "不用担心",
+    "还好",
+    "一般般",
+    "就那样",
+    "算了",
+)
 
 
 class EmotionAnalyzer:
@@ -34,9 +52,18 @@ class EmotionAnalyzer:
 
         sentiment = self._score_sentiment(text)
         support_need = self._contains_any(text, _SUPPORT_WORDS)
-        intent = "advice" if self._contains_any(text, _ADVICE_WORDS) else "chat"
+        advice_signal = self._contains_any(text, _ADVICE_WORDS)
+        hidden_support = self._contains_any(text, _HIDDEN_SUPPORT_CUES)
+        restrained_vulnerability = self._contains_any(text, _RESTRAINED_VULNERABILITY_CUES)
+        vulnerability = self._detect_vulnerability(text, sentiment, hidden_support, restrained_vulnerability)
+        intent = self._infer_intent(
+            advice_signal=advice_signal,
+            support_need=support_need,
+            vulnerability=vulnerability,
+            hidden_support=hidden_support,
+        )
 
-        if support_need > 0.6 and intent == "chat":
+        if (support_need > 0.45 or hidden_support > 0.35) and intent == "chat":
             intent = "support"
 
         event = EmotionEvent(
@@ -46,13 +73,13 @@ class EmotionAnalyzer:
             intent=intent,
             sentiment=sentiment,
             urgency=self._contains_any(text, _URGENT_WORDS),
-            support_need=max(support_need, 0.7 if sentiment < -0.4 else 0.0),
+            support_need=max(support_need, hidden_support, vulnerability * 0.75, 0.7 if sentiment < -0.4 else 0.0),
             attachment_signal=self._contains_any(text, _ATTACHMENT_WORDS),
             praise_signal=1.0 if re.search(r"谢谢|感谢|太好了|awesome|great", text) else 0.0,
             conflict_signal=self._contains_any(text, _CONFLICT_WORDS),
-            vulnerability_signal=1.0 if re.search(r"害怕|不安|脆弱|孤单|i feel alone", text) else 0.0,
+            vulnerability_signal=vulnerability,
             playfulness_signal=self._contains_any(text, _PLAYFUL_WORDS),
-            confidence=0.75,
+            confidence=0.75 if hidden_support == 0 else 0.72,
         )
         if not self.use_llm_assist:
             return event
@@ -69,10 +96,30 @@ class EmotionAnalyzer:
         event.vulnerability_signal = self._blend(
             event.vulnerability_signal, llm_signals.get("vulnerability_signal")
         )
+        event.support_need = self._blend(event.support_need, llm_signals.get("empathy_need"))
         event.attachment_signal = self._blend(event.attachment_signal, llm_signals.get("attachment_signal"))
         event.conflict_signal = self._blend(event.conflict_signal, llm_signals.get("conflict_signal"))
         event.confidence = 0.85
         return event
+
+    @staticmethod
+    def _detect_vulnerability(
+        text: str, sentiment: float, hidden_support: float, restrained_vulnerability: float
+    ) -> float:
+        explicit = 1.0 if re.search(r"害怕|不安|脆弱|孤单|委屈|i feel alone|i'm not okay", text) else 0.0
+        muted = 0.65 if restrained_vulnerability > 0 and sentiment < 0 else 0.0
+        return max(explicit, hidden_support * 0.8, muted)
+
+    @staticmethod
+    def _infer_intent(*, advice_signal: float, support_need: float, vulnerability: float, hidden_support: float) -> str:
+        # "表面求建议，实际求共情": vulnerable + advice defaults to support.
+        if advice_signal > 0 and (vulnerability > 0.35 or hidden_support > 0.3):
+            return "support"
+        if advice_signal > 0:
+            return "advice"
+        if support_need > 0.5 or vulnerability > 0.45:
+            return "support"
+        return "chat"
 
     def _score_sentiment(self, text: str) -> float:
         pos = self._contains_any(text, _POS_WORDS)

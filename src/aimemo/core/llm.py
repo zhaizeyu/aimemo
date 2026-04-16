@@ -187,7 +187,7 @@ async def analyze_emotion_signals(raw_text: str) -> dict:
     """Analyze emotional signals from one user utterance.
 
     Returns JSON-compatible keys:
-    intent, support_need, vulnerability_signal, attachment_signal, conflict_signal
+    intent, support_need, vulnerability_signal, attachment_signal, conflict_signal, empathy_need
     """
     client = get_openai_client()
     resp = await client.chat.completions.create(
@@ -200,6 +200,7 @@ async def analyze_emotion_signals(raw_text: str) -> dict:
                     "Output ONLY valid JSON with these fields:\n"
                     '- "intent": one of "chat", "support", "advice", "conflict"\n'
                     '- "support_need": float 0.0-1.0\n'
+                    '- "empathy_need": float 0.0-1.0 (how much emotional validation is needed)\n'
                     '- "vulnerability_signal": float 0.0-1.0\n'
                     '- "attachment_signal": float 0.0-1.0\n'
                     '- "conflict_signal": float 0.0-1.0\n'
