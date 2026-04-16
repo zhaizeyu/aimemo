@@ -30,6 +30,14 @@ def _configure_test_settings():
     reset_client()
 
 
+@pytest.fixture(autouse=True)
+def _mock_emotion_signal_analysis():
+    """Keep emotion analyzer tests deterministic even when API env vars are set."""
+    with patch("aimemo.core.llm.analyze_emotion_signals", new_callable=AsyncMock) as m:
+        m.return_value = {}
+        yield m
+
+
 @pytest.fixture
 def mock_chat_completion():
     """Mock chat_completion to avoid real LLM calls."""
