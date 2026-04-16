@@ -81,6 +81,15 @@ class EmotionAnalyzer:
             playfulness_signal=self._contains_any(text, _PLAYFUL_WORDS),
             confidence=0.75 if hidden_support == 0 else 0.72,
         )
+        # Keep clear advice requests deterministic and avoid unnecessary LLM override.
+        if (
+            advice_signal > 0
+            and hidden_support == 0
+            and event.support_need < 0.4
+            and event.vulnerability_signal < 0.35
+            and event.conflict_signal < 0.2
+        ):
+            return event
         if not self.use_llm_assist:
             return event
 
