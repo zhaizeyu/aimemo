@@ -106,7 +106,14 @@ class EmotionAnalyzer:
     def _detect_vulnerability(
         text: str, sentiment: float, hidden_support: float, restrained_vulnerability: float
     ) -> float:
-        explicit = 1.0 if re.search(r"害怕|不安|脆弱|孤单|委屈|i feel alone|i'm not okay", text) else 0.0
+        explicit = (
+            1.0
+            if re.search(
+                r"害怕|不安|脆弱|孤单|委屈|撑不住|扛不住|顶不住|i feel alone|i'm not okay",
+                text,
+            )
+            else 0.0
+        )
         muted = 0.65 if restrained_vulnerability > 0 and sentiment < 0 else 0.0
         return max(explicit, hidden_support * 0.8, muted)
 
