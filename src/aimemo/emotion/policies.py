@@ -34,7 +34,13 @@ def apply_emotion_event(state: EmotionState, event: EmotionEvent) -> EmotionStat
     state.mood_valence = _clamp(state.mood_valence + 0.45 * event.sentiment, -1.0, 1.0)
     state.energy = _clamp(state.energy + 0.18 * event.playfulness_signal - 0.12 * event.support_need)
     state.arousal = _clamp(state.arousal + 0.25 * event.urgency + 0.15 * event.conflict_signal)
-    state.stress = _clamp(state.stress + 0.35 * event.urgency + 0.30 * event.conflict_signal)
+    state.stress = _clamp(
+        state.stress
+        + 0.35 * event.urgency
+        + 0.30 * event.conflict_signal
+        + 0.20 * event.support_need
+        + 0.15 * event.vulnerability_signal
+    )
     state.loneliness = _clamp(state.loneliness + 0.10 * event.attachment_signal - 0.08 * event.praise_signal)
     state.comfort_drive = _clamp(
         state.comfort_drive + 0.30 * event.support_need + 0.20 * event.vulnerability_signal

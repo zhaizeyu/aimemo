@@ -28,6 +28,10 @@ _HIDDEN_SUPPORT_CUES = (
     "睡不着",
     "没人懂",
     "心里很乱",
+    "压力很大",
+    "压力好大",
+    "很难过",
+    "很焦虑",
 )
 _RESTRAINED_VULNERABILITY_CUES = (
     "没事",
@@ -118,7 +122,7 @@ class EmotionAnalyzer:
         explicit = (
             1.0
             if re.search(
-                r"害怕|不安|脆弱|孤单|委屈|撑不住|扛不住|顶不住|i feel alone|i'm not okay",
+                r"害怕|不安|脆弱|孤单|委屈|撑不住|扛不住|顶不住|难过|焦虑|压力(很大|好大)?|i feel alone|i'm not okay",
                 text,
             )
             else 0.0
